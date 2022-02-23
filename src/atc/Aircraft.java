@@ -5,16 +5,18 @@
  */
 package atc;
 
-import static atc.Main.bufferingTime;
 import static atc.Main.durationToAnotherAirport;
 import static atc.Main.gateCount;
-import static atc.Main.maximumTimeToDock;
 import static atc.Main.minutesToMilliseconds;
 
 import java.util.Random;
 import java.util.concurrent.atomic.AtomicReference;
-import static atc.Main.maximumTimeToUndock;
 import java.util.concurrent.TimeUnit;
+import static atc.Main.chillingTime;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  *
@@ -40,20 +42,46 @@ class Aircraft implements Runnable {
     Random rnd = new Random();
     private String id;
     private int fuelTime;
+    private int decisionTime;
     private long arriveTime;
+    private long leftTime;
+    private Statistic stat;
     private Airport airport;
-    private Gate assignedGate;
-    private AtomicReference<Status> status;
+    private AtomicReference<Gate> assignedGate;
+    private ArrayBlockingQueue<Passenger> passengersOnBoard;
+    private ArrayBlockingQueue<Thread> passengersThreadsOnBoard;
+
+    private AtomicBoolean allowDisembark;
+    private AtomicBoolean allowEmbark;
+    private Semaphore doorCapactity;
+
+    private volatile AtomicReference<Status> status;
 
     public Aircraft(String id, Airport airport) {
         this.id = id;
         this.airport = airport;
+        this.stat = new Statistic();
         arriveTime = System.currentTimeMillis();
-        //TODO DEBUGGING
-        //      fuelTime = (rnd.nextInt(50) + 31) * minutesToMilliseconds;
-        fuelTime = rnd.nextInt(maximumTimeToUndock * 5) + (durationToAnotherAirport + bufferingTime);
+        decisionTime = rnd.nextInt(5 * minutesToMilliseconds) + 1 * minutesToMilliseconds;
+        fuelTime = rnd.nextInt(chillingTime * 5) + 1 * minutesToMilliseconds + durationToAnotherAirport;
         status = new AtomicReference<Status>(Status.NEW);
-        assignedGate = null;
+        assignedGate = new AtomicReference<Gate>();
+        passengersOnBoard = new ArrayBlockingQueue<Passenger>(50);
+        passengersThreadsOnBoard = new ArrayBlockingQueue<Thread>(50);
+
+        allowDisembark = new AtomicBoolean(false);
+        allowEmbark = new AtomicBoolean(false);
+        doorCapactity = new Semaphore(2);
+        int currentNumberOfPassengers = rnd.nextInt(51);
+        for (int i = 0; i < currentNumberOfPassengers; i++) {
+            Passenger currentPassenger = new Passenger(this, 'D');
+            passengersOnBoard.add(currentPassenger);
+
+            Thread currentPassengerThread = new Thread(currentPassenger);
+            passengersThreadsOnBoard.add(currentPassengerThread);
+            currentPassengerThread.start();
+        }
+
     }
 
     @Override
@@ -63,229 +91,40 @@ class Aircraft implements Runnable {
         while (status.get() != Status.LEFT && status.get() != Status.ISSUE) {
             //Add new incoming aircraft into landing queue, there is a limited capacity for landing queue.
             if (status.get() == Status.NEW) {
-                try {
-                    if (arriveTime + fuelTime - System.currentTimeMillis() + bufferingTime < durationToAnotherAirport) {
-                        if (status.compareAndSet(Status.NEW, Status.LEFT)) {
-                            System.out.println(this.getAircraftCodeName() + " does not have enough fuel to wait, the pilot is flying to another airport.");
-                        } else {
-                            System.out.println(this.getAircraftCodeName() + "'s status is illegal!");
-                        }
-                    } else {
-                        airport.getNormalQueue().add(this);
-                        if (status.compareAndSet(Status.NEW, Status.QUEUE)) {
-                            System.out.println(this.getAircraftCodeName() + " is queueing with " + fuelTime + " milliseconds of fuel time remaining.");
-                        } else {
-                            System.out.println(this.getAircraftCodeName() + "'s status is illegal!");
-                        }
-                    }
-
-                } catch (IllegalStateException e) {
-                    System.out.println("The airport is too packed. " + this.getAircraftCodeName() + " is flying to another airport.");
-                    break;
-                }
+                addToQueue();
             }
 
-            //Add aircraft that is running out of fuel into priority queue. Only two aircraft is allowed in the priority queue.
+            //Add aircraft that is running out of fuel into priority queue.
             if (status.get() == Status.QUEUE) {
-                //The aircraft will consider the extreme situation that the plane took the maximum time to undock
+                //The aircraft will consider the extreme situation that the docked aircraft took the maximum time to undock
+                addToUrgentQueue();
 
-                if (arriveTime + fuelTime - System.currentTimeMillis() < durationToAnotherAirport + maximumTimeToUndock) {
-                    try {
-
-                        //TODO: Do not use PriorityBoundedQueue because it may cause starvation, it is already ensure that the aircraft enters the emergency queue can be landed in time. Instead, ensure fuel time is enough for the plane to travel to another airport.
-                        // Or actually can just remove the one from the list
-//                        System.out.println(airport.getUrgentQueue().size());
-//TODO synchronized priority queue why not needed?
-//                        if (airport.getUrgentQueue().size() < 2) {
-                        airport.getNormalQueue().remove(this);
-                        airport.getUrgentQueue().add(this);
-                        if (!(status.compareAndSet(Status.QUEUE, Status.URGENT) || status.get() == Status.LANDING)) { //The gate thread might have already obtain this aircraft before changing status
-                            System.out.println(this.getAircraftCodeName() + "'s status is illegal!");
-                        }
-                        System.out.println(this.getAircraftCodeName() + " is running low on fuel and has been added to the emergency queue.");
-
-//                            System.out.println(airport.getUrgentQueue().size());
-//                        } else {
-//                            if (status.compareAndSet(Status.QUEUE, Status.LEFT)) { //In case the gate obtained this aircraft
-//                                airport.getNormalQueue().remove(this);
-//                                if (arriveTime + fuelTime - System.currentTimeMillis() >= durationToAnotherAirport) {
-//                                    System.out.println(this.getAircraftCodeName() + " is running low on fuel but the emergency queue if already full. The pilot is flying to another airport.");
-//                                } else {
-//                                    //When the plane does not have time to fly to another airport
-//                                    status.set(Status.ISSUE);
-//                                    System.out.println(this.getAircraftCodeName() + " does not have the fuel to fly to another airport. The plane is landing in an abandoned airport just in case.");
-//                                }
-//                            }
-//                        }
-                    } catch (IllegalStateException e) {
-                        e.printStackTrace();
-                    }
-                }
             }
 
-            //TODO: Runway control elsewhere using trylock just in case deadlock happens
-            // also remember to lock gate --- noneed gate is htread
-            //TODO: ERROR HANDLING WHEN GATE IS NULL?
             //Inform that the aircraft is landing and assign a duration for the aircraft to land
             if (status.get() == Status.LANDING) {
-                try {
-                    int landingTime = rnd.nextInt(3 * minutesToMilliseconds) + 1 * minutesToMilliseconds; //The pilot will also perform emergency landing the fuel time is less than landing time.
-
-                    //Problem 5
-                    //Two aircrafts are using the runway at the same time
-                    
-                    if (airport.getRunway().tryLock(arriveTime + fuelTime - System.currentTimeMillis() - landingTime, TimeUnit.MILLISECONDS)) {
-                        System.out.println(this.getAircraftCodeName() + " is using the runway for landing after assigned to " + assignedGate.getGateCodeName() + ".");
-
-                        //safety precaution
-//                    if (airport.getRunway().getOwner()==this) {
-//                        System.out.println(this.getAircraftCodeName()+" is flying to another airport because the ");
-//                    } else {
-                        //will it call the landing time twice?
-//                    int landingTime = (rnd.nextInt(3) + 1) * minutesToMilliseconds;
-//                    System.out.println(this.getAircraftCodeName() + " will complete the landing in " + landingTime / 1000 + " seconds.");
-                        Thread.sleep(landingTime);
-                        System.out.println(this.getAircraftCodeName() + " has completed landing in " + landingTime + " milliseconds.");
-                        if (!status.compareAndSet(Status.LANDING, Status.DOCKING)) {
-                            System.out.println(this.getAircraftCodeName() + "'s status is illegal!");
-
-                        }
-                        airport.getRunway().unlock();
-                        System.out.println(this.getAircraftCodeName() + " has freed the runway access after landing.");
-                    } else {
-                        System.out.println(this.getAircraftCodeName() + " is emergency landing because running out of fuel waiting for runway. STARVATION" + (arriveTime + fuelTime - System.currentTimeMillis()));
-                        status.set(Status.ISSUE);
-                        assignedGate.notify();
-                    }
-//                    }
-                } catch (Exception e) {
-                    e.printStackTrace();
-                }
+                landing();
             }
 
-            //Aircraft docking
-            if (status.get() == Status.DOCKING) {
-                try {
-
-                    //Intersection if not first gate
-                    if (assignedGate.getName() != 'A') {
-                        airport.getIntersection().acquire();
-                        System.out.println(this.getAircraftCodeName() + " is using the intersection.");
-                        Thread.sleep(1 * minutesToMilliseconds);
-                        airport.getIntersection().release();
-                    }
-
-                    int dockingTime = rnd.nextInt(4 * minutesToMilliseconds);
-                    Thread.sleep(dockingTime);
-                    System.out.println(this.getAircraftCodeName() + " has docked to " + assignedGate.getGateCodeName() + " in " + dockingTime + " milliseconds.");
-                    if (!status.compareAndSet(Status.DOCKING, Status.GATE)) {
-                        System.out.println(this.getAircraftCodeName() + "'s status is illegal!");
-                    }
-                } catch (Exception e) {
-                    e.printStackTrace();
-                }
-            }
-
-            //Aircraft activities ongoing simultaneously.
-            if (status.get() == Status.GATE) { //TODO INCOMPELTE ADD ACTIVITIES
-                try {
-                    
-                    //Problem 
-                    System.out.println(this.getAircraftCodeName() + " is busy.");
-                    Thread act4 = new Thread(new Activity(4, this.getAircraftCodeName(), "Passengers disembark", 11, 5));
-                    Thread act5 = new Thread(new Activity(5, this.getAircraftCodeName(), "Refill supplies and clean", 21, 10));
-                    Thread act6 = new Thread(new Activity(6, this.getAircraftCodeName(), "Refill fuel", 51, 10));
-                    Thread act7 = new Thread(new Activity(7, this.getAircraftCodeName(), "Passengers embark", 11, 5));
-                    act4.start();
-                    act5.start();
-                    act6.start();
-                    act4.join();
-                    act5.join();
-
-                    act7.start();
-                    act6.join();
-                    act7.join();
-
-                    System.out.println(this.getAircraftCodeName() + " is ready to go! Runway access is granted. Undocking...");
-                    if (!status.compareAndSet(Status.GATE, Status.UNDOCKING)) {
-                        System.out.println(this.getAircraftCodeName() + "'s status is illegal!");
-                    }
-
-                } catch (Exception e) {
-                    e.printStackTrace();
-                }
-            }
-
-            //Aircraft undocking
-            if (status.get() == Status.UNDOCKING) {
-                try {
-                    synchronized (assignedGate) {
-                        //Intersection if not last gate
-                        //Lock the runway, aircraft waits for the runway to become available
-                        //Move away from
-                        Thread.sleep(1 * minutesToMilliseconds);
-                        if (assignedGate.getName() != 'A' + gateCount - 1) {
-                            airport.getIntersection().acquire();
-                            System.out.println(this.getAircraftCodeName() + " is using the intersection.");
-                            Thread.sleep(1 * minutesToMilliseconds);
-                            airport.getIntersection().release();
-                        }
-                        System.out.println(this.getAircraftCodeName() + " is checking for runway availability.");
-                        airport.getRunway().lock();
-                        int undockingTime = (rnd.nextInt(4 * minutesToMilliseconds));
-                        Thread.sleep(undockingTime);
-                        System.out.println(this.getAircraftCodeName() + " has undocked from " + assignedGate.getGateCodeName() + " in " + undockingTime + " milliseconds.");
-                        if (!status.compareAndSet(Status.UNDOCKING, Status.TAKEOFF)) {
-                            System.out.println(this.getAircraftCodeName() + "'s status is illegal!");
-                        }
-                        assignedGate.notify();
-                    }
-                } catch (Exception e) {
-                    e.printStackTrace();
-                }
-            }
-
-            //Inform that the aircraft is taking off and assign a duration for the aircraft to take off
-            if (status.get() == Status.TAKEOFF) {
-                try {
-                    int takeOffTime = (rnd.nextInt(3 * minutesToMilliseconds) + 1 * minutesToMilliseconds);
-                    Thread.sleep(takeOffTime);
-                    System.out.println(this.getAircraftCodeName() + " took off in " + takeOffTime + " milliseconds. We wish them a safe flight.");
-                    if (!status.compareAndSet(Status.TAKEOFF, Status.LEFT)) {
-                        System.out.println(this.getAircraftCodeName() + "'s status is illegal!");
-                    }
-                } catch (Exception e) {
-                    e.printStackTrace();
-                } finally {
-                    airport.getRunway().unlock();
-                    System.out.println(this.getAircraftCodeName() + " has freed the runway access after taking off.");
-
-                }
-            }
-             
-            if (arriveTime + fuelTime- System.currentTimeMillis() + bufferingTime >= durationToAnotherAirport && arriveTime + fuelTime- System.currentTimeMillis() - durationToAnotherAirport < maximumTimeToDock) { //also larger than the time to another airport
-                if (status.compareAndSet(Status.URGENT, Status.LEFT)||status.compareAndSet(Status.QUEUE, Status.LEFT)) {
-                    System.out.println(airport.getUrgentQueue().peek()==this||status.get()==Status.QUEUE);
+            if (arriveTime + fuelTime - System.currentTimeMillis() >= durationToAnotherAirport && arriveTime + fuelTime - System.currentTimeMillis() <= durationToAnotherAirport + decisionTime && status.get().getPhase() < 2) { //also larger than the time to another airport
+                if (status.compareAndSet(Status.URGENT, Status.LEFT) || status.compareAndSet(Status.QUEUE, Status.LEFT) || status.compareAndSet(Status.LANDING, Status.LEFT)) {
+                    //System.out.println(airport.getUrgentQueue().peek() == this || status.get() == Status.QUEUE);
                     airport.getNormalQueue().remove(this);
                     airport.getUrgentQueue().remove(this);
-                    System.out.println(this.getAircraftCodeName() + " left for another airport because the airport is too busy and it is running out of fuel.");
-                    
+                    System.err.println(this.getAircraftCodeName() + " left for another airport because the airport is too busy and it is running out of fuel.");
+
                 }
             }
 
-            
-            //Not allow scenarios
-            
-            //Problem 2
             //Aircraft does not have enough fuel time to reach another airport, which is when the fuel time is less than 30 minutes.
             if (arriveTime + fuelTime - System.currentTimeMillis() < durationToAnotherAirport && status.get().getPhase() < 2) {
                 //Should be leaving from urgent queue
-                //System.err.println(this.getAircraftCodeName() + " does not have the fuel to fly to another airport. The plane is landing in an abandoned airport just in case.");
+                System.err.println(this.getAircraftCodeName() + " does not have the fuel to fly to another airport. The plane is landing in an abandoned airport just in case.");
                 airport.getNormalQueue().remove(this);
                 airport.getUrgentQueue().remove(this);
                 status.set(Status.ISSUE);
             }
-            
+
             //Problem 1
             //Aircraft crashes when the fuel time is less than 0. 
             //Starvation
@@ -295,25 +134,435 @@ class Aircraft implements Runnable {
                 airport.getUrgentQueue().remove(this);
                 System.err.println("BBC News Report: " + this.getAircraftCodeName() + " had crashed in Asia Pacific Airport due to disastrous air traffic control system.");
 
-                if (assignedGate != null) {
-                    assignedGate.notify();
-                    //No use, runway is still lock
-                }
-
                 status.set(Status.ISSUE);
             }
 
-            //Problem 3
-            //Aircraft stops at the middle because not enough fuel to coast to the gate
-            //Deadlock
-            if (arriveTime + fuelTime - System.currentTimeMillis() < 0 && status.get().getPhase() == 3) {
-                System.err.println(this.getAircraftCodeName() + " ran out of fuel at the middle of the road. DEADLOCK!");
-                status.set(Status.ISSUE);
+            if (status.get() == Status.ISSUE) {
+                System.err.println(this);
+            }
+        }
+    }
+
+    public synchronized void addToQueue() {
+        try {
+            if (arriveTime + fuelTime - System.currentTimeMillis() < durationToAnotherAirport + decisionTime) {
+                if (status.compareAndSet(Status.NEW, Status.LEFT)) {
+                    System.out.println(this.getAircraftCodeName() + " does not have enough fuel to wait, the pilot is flying to another airport.");
+                    return;
+                } else {
+                    System.err.println(this.getAircraftCodeName() + "'s status is illegal!");
+                    rescue();
+                }
+            } else {
+                while (!airport.getNormalQueue().add(this)) {
+                    System.err.println(this.getAircraftCodeName() + " is being added to normal queue");
+                };
+                System.out.println(this.getAircraftCodeName() + " is added to normal queue");
+
+                if (status.compareAndSet(Status.NEW, Status.QUEUE)) {
+                    System.out.println(this.getAircraftCodeName() + " is queueing with " + fuelTime + " milliseconds of fuel time remaining.");
+                } else {
+                    System.err.println(this.getAircraftCodeName() + "'s status is illegal!");
+                    rescue();
+                }
+            }
+            addToUrgentQueue();
+
+        } catch (IllegalStateException e) {
+            System.out.println("The airport is too packed. " + this.getAircraftCodeName() + " is flying to another airport.");
+            status.set(Status.LEFT);
+        }
+    }
+
+    public synchronized void addToUrgentQueue() {
+        if (arriveTime + fuelTime - System.currentTimeMillis() < durationToAnotherAirport + chillingTime) {
+            airport.getNormalQueue().remove(this);
+
+            while (!airport.getUrgentQueue().add(this)) {
+                System.err.println(this.getAircraftCodeName() + " is being added to urgent queue");
+            };
+            System.out.println(this.getAircraftCodeName() + " is added to urgent queue");
+            if (!(status.compareAndSet(Status.QUEUE, Status.URGENT) || status.get() == Status.LANDING)) { //The gate thread might have already obtain this aircraft before changing status
+                System.out.println(this.getAircraftCodeName() + "'s status is illegal!");
+                rescue();
+            }
+            System.out.println(this.getAircraftCodeName() + " is running low on fuel and has been added to the emergency queue.");
+        }
+    }
+
+    public synchronized void landing() {
+        if (assignedGate.get() != null) {
+            int landingTime = rnd.nextInt(3 * minutesToMilliseconds) + 1 * minutesToMilliseconds;
+            try {
+                synchronized (assignedGate.get()) {
+                    if (assignedGate.get().getName() != 'A') {
+                        //Another approach of 
+                        if (!airport.getTraffic().getRoadToIntersectionFromRunway().tryAcquire(arriveTime + fuelTime - System.currentTimeMillis() - durationToAnotherAirport - decisionTime, TimeUnit.MILLISECONDS)) {
+                            assignedGate.get().notify();
+                            assignedGate.set(null);
+                            return;
+                        }
+                    } else {
+                        if (!airport.getTraffic().getRoadToNearestGateFromRunway().tryAcquire(arriveTime + fuelTime - System.currentTimeMillis() - durationToAnotherAirport - decisionTime, TimeUnit.MILLISECONDS)) {
+                            assignedGate.get().notify();
+                            assignedGate.set(null);
+                            return;
+                        }
+                    }
+                }
+            } catch (InterruptedException ex) {
+                rescue();
+                ex.printStackTrace();
+                return;
+            }
+
+            try {
+                if (airport.getRunway().tryLock(arriveTime + fuelTime - System.currentTimeMillis() - durationToAnotherAirport - decisionTime, TimeUnit.MILLISECONDS)) {
+
+                    System.out.println(this.getAircraftCodeName() + " is using the runway for landing after assigned to " + assignedGate.get().getGateCodeName() + ".");
+                    Thread.sleep(landingTime);
+
+                    System.out.println(this.getAircraftCodeName() + " has completed landing in " + landingTime + " milliseconds.");
+                    if (!status.compareAndSet(Status.LANDING, Status.DOCKING)) {
+                        System.out.println(this.getAircraftCodeName() + "'s status is illegal!");
+                        rescue();
+                        airport.getRunway().unlock();
+                    }
+                } else {
+                    if (assignedGate.get() != null) {
+                        assignedGate.get().notifyAll();
+//                assignedGate.set(null);
+                    }
+                    airport.getTraffic().getRoadToIntersectionFromRunway().release();
+                    return;
+                }
+            } catch (InterruptedException ex) {
+                rescue();
+                airport.getTraffic().getRoadToIntersectionFromRunway().release();
+                ex.printStackTrace();
+                return;
+            }
+            docking();
+        }
+
+    }
+
+    public synchronized void docking() {
+
+        //Use intersection if not first gate
+        if (assignedGate.get().getName() != 'A') {
+
+            airport.getRunway().unlock();
+            System.out.println(this.getAircraftCodeName() + " has freed the runway access after landing.");
+
+            System.out.println(this.getAircraftCodeName() + " is on the road to intersection.");
+            try {
+                Thread.sleep(2 * minutesToMilliseconds);
+            } catch (InterruptedException ex) {
+                rescue();
+                airport.getTraffic().getRoadToIntersectionFromRunway().release();
+                ex.printStackTrace();
+                return;
+            }
+
+            try {
+                //Check if from intersection to gate is free before locking the intersection
+                airport.getTraffic().getRoadToGateFromIntersection().acquire();
+                System.out.println("Road to " + assignedGate.get().getGateCodeName() + " from intersection is free.");
+
+            } catch (InterruptedException ex) {
+                rescue();
+                airport.getTraffic().getRoadToIntersectionFromRunway().release();
+                ex.printStackTrace();
+                return;
+            }
+
+            airport.getIntersection().lock();
+            System.out.println(this.getAircraftCodeName() + " is using the intersection.");
+            airport.getTraffic().getRoadToIntersectionFromRunway().release();
+
+            try {
+                Thread.sleep(1 * minutesToMilliseconds);
+                System.out.println(this.getAircraftCodeName() + " is on the road to " + assignedGate.get().getGateCodeName() + ".");
+            } catch (InterruptedException ex) {
+                rescue();
+                airport.getTraffic().getRoadToGateFromIntersection().release();
+                ex.printStackTrace();
+                return;
+            } finally {
+                airport.getIntersection().unlock();
+            }
+
+            try {
+                Thread.sleep(2 * minutesToMilliseconds);
+            } catch (InterruptedException ex) {
+                rescue();
+                ex.printStackTrace();
+                return;
+            } finally {
+                airport.getTraffic().getRoadToGateFromIntersection().release();
+            }
+
+        } else {
+            System.out.println(this.getAircraftCodeName() + " is on the road to " + assignedGate.get().getGateCodeName() + ".");
+            System.out.println(this.getAircraftCodeName() + " has freed the runway access after landing.");
+            airport.getRunway().unlock();
+
+            try {
+                Thread.sleep(2 * minutesToMilliseconds);
+            } catch (InterruptedException ex) {
+                rescue();
+                ex.printStackTrace();
+                return;
+            } finally {
+                airport.getTraffic().getRoadToNearestGateFromRunway().release();
+            }
+        }
+
+        int dockingTime = rnd.nextInt(4 * minutesToMilliseconds);
+        try {
+            Thread.sleep(dockingTime);
+        } catch (InterruptedException ex) {
+            rescue();
+            ex.printStackTrace();
+            return;
+        }
+        System.out.println(this.getAircraftCodeName() + " has docked to " + assignedGate.get().getGateCodeName() + " in " + dockingTime + " milliseconds.");
+        if (!status.compareAndSet(Status.DOCKING, Status.GATE)) {
+            System.out.println(this.getAircraftCodeName() + "'s status is illegal!");
+            rescue();
+
+        }
+        working();
+
+    }
+
+    public synchronized void working() {
+        try {
+
+            //Concurrent, will be working throughout the process
+            Thread refillFuel = new Thread(new Activity(this.getAircraftCodeName(), "Refill fuel", 51, 10));
+            refillFuel.start();
+
+            //Concurrent
+            //Allow passenger to disembark
+            System.out.println(this.getAircraftCodeName() + " allows passenger to disembark. There are a total of " + passengersOnBoard.size() + " passengers on board.");
+            if (allowDisembark.compareAndSet(false, true)) {
+
+                for (Passenger p : passengersOnBoard) {
+                    synchronized (p) {
+                        p.notify();
+                    }
+                }
+                //Wait until passengers are all disembarked
+                while (passengersOnBoard.size() != 0) {
+
+                }
+                System.out.println(this.getAircraftCodeName() + " has all the passengers disembarked.");
+            }
+            //Sequential, starts right after all the passengers disembarked.
+            Thread cabinActivity = new Thread(new Activity(this.getAircraftCodeName(), "Refill supplies and clean cabin", 21, 10));
+            cabinActivity.start();
+
+            //Sequential, starts right after all the passengers disembarked.
+            cabinActivity.join();
+
+            //Sequential
+            //Allow passenger to embark
+            System.out.println(this.getAircraftCodeName() + " allows passenger to embark. There are a total of " + airport.getLounge().countOfPassengers(id) + " passengers waiting.");
+            if (allowEmbark.compareAndSet(false, true)) {
+                for (Passenger p : airport.getLounge().getWaitingPassengers(id)) {
+                    synchronized (p) {
+                        p.notify();
+                    }
+                }
+            }
+
+            //Wait until passengers are all embarked
+            while (!airport.getLounge().getWaitingPassengers(id).isEmpty()) {
+            }
+            System.out.println(this.getAircraftCodeName() + " has a total of " + passengersOnBoard.size() + " passengers embarked.");
+
+            //Wait for fuel to complete refuel
+            refillFuel.join();
+
+            System.out.println(this.getAircraftCodeName() + " is ready to go! Undocking...");
+            if (!status.compareAndSet(Status.GATE, Status.UNDOCKING)) {
+                System.out.println(this.getAircraftCodeName() + "'s status is illegal!");
+            }
+
+        } catch (Exception e) {
+            rescue();
+            e.printStackTrace();
+            return;
+        }
+
+        undocking();
+    }
+
+    public synchronized void undocking() {
+
+        int undockingTime = (rnd.nextInt(4 * minutesToMilliseconds));
+
+        if (assignedGate.get().getName() != 'A' + gateCount - 1) {
+            synchronized (assignedGate.get()) {
+                try {
+                    airport.getTraffic().getRoadToIntersectionFromGate()[assignedGate.get().getName() - 'A'].acquire();
+                    System.out.println("Road to intersection from " + assignedGate.get().getGateCodeName() + " is free.");
+                } catch (InterruptedException ex) {
+                    rescue();
+                    ex.printStackTrace();
+                }
+
+                try {
+                    //Aircraft is undocking
+                    Thread.sleep(undockingTime);
+
+                } catch (InterruptedException ex) {
+                    rescue();
+                    ex.printStackTrace();
+                }
+
+                System.out.println(this.getAircraftCodeName() + " has undocked from " + assignedGate.get().getGateCodeName() + " in " + undockingTime + " milliseconds.");
+                try {
+                    assignedGate.get().notify();
+                } catch (Exception e) {
+                    rescue();
+                    e.printStackTrace();
+                }
+            }
+            System.out.println(this.getAircraftCodeName() + " is on the road to intersection from " + assignedGate.get().getGateCodeName() + ".");
+            try {
+                Thread.sleep(2 * minutesToMilliseconds);
+            } catch (InterruptedException ex) {
+                rescue();
+                ex.printStackTrace();
+                return;
+            }
+
+            try {
+                //Check if from intersection to standby is free before locking the intersection
+                airport.getTraffic().getRoadToStandbyFromIntersection().acquire();
+                System.out.println("Road to take-off standby from intersection is free.");
+
+            } catch (InterruptedException ex) {
+                rescue();
+                ex.printStackTrace();
+                return;
+            }
+
+            airport.getIntersection().lock();
+            System.out.println(this.getAircraftCodeName() + " is using the intersection.");
+            airport.getTraffic().getRoadToIntersectionFromGate()[assignedGate.get().getName() - 'A'].release();
+
+            try {
+                Thread.sleep(1 * minutesToMilliseconds); //Going through intersection
+                System.out.println(this.getAircraftCodeName() + " is on the road to standby take-off.");
+            } catch (InterruptedException ex) {
+                rescue();
+                airport.getTraffic().getRoadToStandbyFromIntersection().release();
+                ex.printStackTrace();
+                return;
+            } finally {
+                airport.getIntersection().unlock();
+            }
+
+            try {
+                Thread.sleep(2 * minutesToMilliseconds);
+                airport.getTraffic().getStandbyTakeOff().acquire();
+                System.out.println(this.getAircraftCodeName() + " is in standby to take-off.");
+
+            } catch (InterruptedException ex) {
+                rescue();
+                ex.printStackTrace();
+                return;
+            } finally {
+                airport.getTraffic().getRoadToStandbyFromIntersection().release();
+            }
+
+        } else {
+
+            synchronized (assignedGate.get()) {
+                try {
+                    airport.getTraffic().getRoadToStandbyFromNearestGate().acquire();
+                    System.out.println("Road to standby from " + assignedGate.get().getGateCodeName() + " is free.");
+                } catch (InterruptedException ex) {
+                    rescue();
+                    ex.printStackTrace();
+                    return;
+                }
+
+                try {
+                    //Aircraft is undocking
+                    Thread.sleep(undockingTime);
+
+                } catch (InterruptedException ex) {
+                    rescue();
+                    ex.printStackTrace();
+                    return;
+                }
+
+                System.out.println(this.getAircraftCodeName() + " has undocked from " + assignedGate.get().getGateCodeName() + " in " + undockingTime + " milliseconds.");
+                assignedGate.get().notify();
+            }
+            System.out.println(this.getAircraftCodeName() + " is on the road to standby from " + assignedGate.get().getGateCodeName() + ".");
+            try {
+                Thread.sleep(2 * minutesToMilliseconds);
+                airport.getTraffic().getStandbyTakeOff().acquire();
+                System.out.println(this.getAircraftCodeName() + " is in standby to take-off.");
+
+            } catch (InterruptedException ex) {
+                rescue();
+                ex.printStackTrace();
+                return;
+            } finally {
+                airport.getTraffic().getRoadToStandbyFromNearestGate().release();
             }
 
         }
-        if (status.get() == Status.ISSUE) {
-            System.err.println(this);
+        if (!status.compareAndSet(Status.UNDOCKING, Status.TAKEOFF)) {
+            System.out.println(this.getAircraftCodeName() + "'s status is illegal!");
+            rescue();
+        }
+        airport.getRunway().lock();
+        airport.getTraffic().getStandbyTakeOff().release();
+        System.out.println(this.getAircraftCodeName() + "'s turn to use the runway.");
+        takingOff();
+    }
+
+    public synchronized void takingOff() {
+        try {
+            int takeOffTime = (rnd.nextInt(3 * minutesToMilliseconds) + 1 * minutesToMilliseconds);
+            Thread.sleep(takeOffTime);
+            System.out.println(this.getAircraftCodeName() + " took off in " + takeOffTime + " milliseconds. We wish them a safe flight.");
+            stat.updateAircraftStats(arriveTime, System.currentTimeMillis());
+            if (!status.compareAndSet(Status.TAKEOFF, Status.LEFT)) {
+                System.out.println(this.getAircraftCodeName() + "'s status is illegal!");
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+            return;
+        } finally {
+            System.out.println(this.getAircraftCodeName() + " has freed the runway access after taking off.");
+            airport.getRunway().unlock();
+
+        }
+    }
+
+    public void rescue() {
+        try {
+            Thread.sleep(3 * minutesToMilliseconds);
+            System.out.println(this.getAircraftCodeName() + " had been removed from the path. We are still studying the problem.");
+            status.set(Status.ISSUE);
+            if (assignedGate.get() != null) {
+                assignedGate.get().notifyAll();
+//                assignedGate.set(null);
+            }
+
+        } catch (Exception e) {
+            while (true) {
+                System.err.println("Rescue " + this.getAircraftCodeName() + " failed!");
+            }
         }
     }
 
@@ -331,6 +580,14 @@ class Aircraft implements Runnable {
 
     public void setId(String id) {
         this.id = id;
+    }
+
+    public int getDecisionTime() {
+        return decisionTime;
+    }
+
+    public void setDecisionTime(int decisionTime) {
+        this.decisionTime = decisionTime;
     }
 
     public int getFuelTime() {
@@ -357,11 +614,11 @@ class Aircraft implements Runnable {
         this.airport = airport;
     }
 
-    public Gate getAssignedGate() {
+    public AtomicReference<Gate> getAssignedGate() {
         return assignedGate;
     }
 
-    public void setAssignedGate(Gate assignedGate) {
+    public void setAssignedGate(AtomicReference<Gate> assignedGate) {
         this.assignedGate = assignedGate;
     }
 
@@ -373,9 +630,49 @@ class Aircraft implements Runnable {
         this.status = status;
     }
 
+    public ArrayBlockingQueue<Passenger> getPassengersOnBoard() {
+        return passengersOnBoard;
+    }
+
+    public void setPassengersOnBoard(ArrayBlockingQueue<Passenger> passengersOnBoard) {
+        this.passengersOnBoard = passengersOnBoard;
+    }
+
+    public AtomicBoolean getAllowDisembark() {
+        return allowDisembark;
+    }
+
+    public void setAllowDisembark(AtomicBoolean allowDisembark) {
+        this.allowDisembark = allowDisembark;
+    }
+
+    public AtomicBoolean getAllowEmbark() {
+        return allowEmbark;
+    }
+
+    public void setAllowEmbark(AtomicBoolean allowEmbark) {
+        this.allowEmbark = allowEmbark;
+    }
+
+    public Semaphore getDoor() {
+        return doorCapactity;
+    }
+
+    public void setDoorCapactity(Semaphore doorCapactity) {
+        this.doorCapactity = doorCapactity;
+    }
+
+    public Statistic getStat() {
+        return stat;
+    }
+
+    public void setStat(Statistic stat) {
+        this.stat = stat;
+    }
+
     @Override
     public String toString() {
-        return "Aircraft{" + "rnd=" + rnd + ", id=" + id + ", fuelTime=" + fuelTime + ", arriveTime=" + arriveTime + ", airport=" + airport + ", assignedGate=" + assignedGate + ", status=" + status + '}';
+        return "Aircraft{" + "rnd=" + rnd + ", id=" + id + ", fuelTime=" + fuelTime + ", arriveTime=" + arriveTime + ", airport=" + airport + ", assignedGate.get()=" + assignedGate.get() + ", status=" + status + '}';
     }
 
 }

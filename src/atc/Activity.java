@@ -15,15 +15,13 @@ import java.util.Random;
  */
 class Activity implements Runnable {
 
-    private int id;
     private String name;
     private String aircraftCodeName;
     private int rangeInMinutes;
     private int minTimeInMinutes;
     private int duration = 0;
 
-    public Activity(int id,  String aircraftCodeName,String name, int rangeInMinutes, int minTimeInMinutes) {
-        this.id = id;
+    public Activity(String aircraftCodeName,String name, int rangeInMinutes, int minTimeInMinutes) {
         this.name = name;
         this.aircraftCodeName = aircraftCodeName;
         this.rangeInMinutes = rangeInMinutes;
@@ -33,10 +31,10 @@ class Activity implements Runnable {
     @Override
     public void run() {
         try {
-            //System.out.println(aircraftCodeName+" ongoing activity " + id + " " + name);
+            System.out.println(aircraftCodeName+" ongoing activity " + name);
             duration = new Random().nextInt(rangeInMinutes * minutesToMilliseconds) + minTimeInMinutes * minutesToMilliseconds;
             Thread.sleep(duration);
-            //System.out.println(aircraftCodeName+" completed activity " + id + " " + name + " in " + duration + " milliseconds.");
+            System.out.println(aircraftCodeName+" completed activity " + name + " in " + duration + " milliseconds.");
         } catch (Exception e) {
             e.printStackTrace();
         }

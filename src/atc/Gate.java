@@ -5,7 +5,7 @@
  */
 package atc;
 
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  *
@@ -15,62 +15,55 @@ class Gate implements Runnable {
 
     private char name;
     private Airport airport;
-    private Aircraft currAircraft;
-    private AtomicBoolean isAvailable;
+    private volatile AtomicReference<Aircraft> currAircraft;
 
     public Gate(char name, Airport airport) {
         this.name = name;
         this.airport = airport;
-        isAvailable = new AtomicBoolean(true);
-        currAircraft = null;
+        currAircraft = new AtomicReference<Aircraft>();
     }
 
     @Override
     public void run() {
-        //TODO Close the gate
-        //TODO wait if list is empty, and the aircraft need to inform the gate
-        while (true) {
-            if (isAvailable.get()) {
-                try {
-                    synchronized (this){
-                        //Problem 7
-                        //Aircraft that is not given priority to land lands before the aircraft that is given priority
-                        //Starvation
-                        if ((currAircraft = airport.getUrgentQueue().poll()) == null) {
-                            //Just to be safe, the scenario is when another gate already taken the aircraft, the list is empty and may cause starvation.
-                            //currAircraft = airport.getUrgentQueue().poll(100, TimeUnit.MILLISECONDS);
-                            //currAircraft = airport.getUrgentQueue().poll();
-                            currAircraft = airport.getNormalQueue().poll();
-                        }
-//                        else {
-//                            //Just to be safe, the scenario is when the item in queue is changed, the list is empty and may cause starvation.
-//                            //currAircraft = airport.getNormalQueue().poll(100, TimeUnit.MILLISECONDS);
-//                            currAircraft = airport.getNormalQueue().poll();
-//                        }
+        try {
+            while (airport.getIsOperate().get()) {
+                currAircraft.set(airport.getUrgentQueue().poll());
+                if (currAircraft.get() != null) {
 
-                        if (currAircraft != null) {
-                            //Ensure that the aircraft does not left the airport
-                            synchronized (currAircraft) {
-                                if (currAircraft.getStatus().compareAndSet(Status.QUEUE, Status.LANDING) || currAircraft.getStatus().compareAndSet(Status.URGENT, Status.LANDING)) {
-                                    isAvailable.set(false);
-                                    System.out.println(this.getGateCodeName() + " is assigned to "+currAircraft.getAircraftCodeName()+".");
-                                    currAircraft.setAssignedGate(this);
-                                    this.wait();
-                                    System.out.println(this.getGateCodeName() + " is available.");
-                                    isAvailable.set(true);
 
-                                }
-                            }
-
-                        }
-                    }
-
-                } catch (Exception e) {
-                    e.printStackTrace();
+                } else {
+                    currAircraft.set(airport.getNormalQueue().poll());
                 }
-
+                if (currAircraft.get() != null) {
+                    //Ensure that the aircraft does not left the airport
+                    taken();
+                }
             }
+
+
+        } catch (Exception e) {
+            e.printStackTrace();
         }
+    }
+
+    public void taken() {
+        try {
+            synchronized (this) {
+                if (currAircraft.get().getStatus().compareAndSet(Status.QUEUE, Status.LANDING) || currAircraft.get().getStatus().compareAndSet(Status.URGENT, Status.LANDING)) {
+                    System.out.println(this.getGateCodeName() + " is assigned to " + currAircraft.get().getAircraftCodeName() + ".");
+                    currAircraft.get().getAssignedGate().set(this);
+//                    currAircraft.get().landing();
+                    this.wait();
+                    //Will be notified by aircraft
+                    currAircraft.set(null);
+                    System.out.println(this.getGateCodeName() + " is available.");
+                }
+            }
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
     }
 
     public char getName() {
@@ -83,6 +76,14 @@ class Gate implements Runnable {
 
     public String getGateCodeName() {
         return "Gate " + name;
+    }
+
+    public AtomicReference<Aircraft> getCurrAircraft() {
+        return currAircraft;
+    }
+
+    public void setCurrAircraft(AtomicReference<Aircraft> currAircraft) {
+        this.currAircraft = currAircraft;
     }
 
 }
