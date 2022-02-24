@@ -38,6 +38,7 @@ class Gate implements Runnable {
                     //Ensure that the aircraft does not left the airport
                     taken();
                 }
+                Thread.sleep(100);
             }
 
 
@@ -49,10 +50,10 @@ class Gate implements Runnable {
     public void taken() {
         try {
             synchronized (this) {
-                if (currAircraft.get().getStatus().compareAndSet(Status.QUEUE, Status.LANDING) || currAircraft.get().getStatus().compareAndSet(Status.URGENT, Status.LANDING)) {
+                if (currAircraft.get().getStatus().compareAndSet(Status.QUEUE, Status.LANDING) ||
+                        currAircraft.get().getStatus().compareAndSet(Status.URGENT, Status.LANDING)) {
                     System.out.println(this.getGateCodeName() + " is assigned to " + currAircraft.get().getAircraftCodeName() + ".");
                     currAircraft.get().getAssignedGate().set(this);
-//                    currAircraft.get().landing();
                     this.wait();
                     //Will be notified by aircraft
                     currAircraft.set(null);

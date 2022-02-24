@@ -12,7 +12,7 @@ package atc;
 public class Main {
 
     public static int gateCount = 2;
-    public static int minutesToMilliseconds = 45;
+    public static int minutesToMilliseconds = 70;
     public static int maximumLandingTime = 3*minutesToMilliseconds;
 
     public static int chillingTime = 60 * minutesToMilliseconds; //Added the maximum time the aircraft will have to wait to get passed the intersection

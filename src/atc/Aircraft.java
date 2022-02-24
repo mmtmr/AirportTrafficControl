@@ -108,7 +108,6 @@ class Aircraft implements Runnable {
 
             if (arriveTime + fuelTime - System.currentTimeMillis() >= durationToAnotherAirport && arriveTime + fuelTime - System.currentTimeMillis() <= durationToAnotherAirport + decisionTime && status.get().getPhase() < 2) { //also larger than the time to another airport
                 if (status.compareAndSet(Status.URGENT, Status.LEFT) || status.compareAndSet(Status.QUEUE, Status.LEFT) || status.compareAndSet(Status.LANDING, Status.LEFT)) {
-                    //System.out.println(airport.getUrgentQueue().peek() == this || status.get() == Status.QUEUE);
                     airport.getNormalQueue().remove(this);
                     airport.getUrgentQueue().remove(this);
                     System.err.println(this.getAircraftCodeName() + " left for another airport because the airport is too busy and it is running out of fuel.");
@@ -125,10 +124,8 @@ class Aircraft implements Runnable {
                 status.set(Status.ISSUE);
             }
 
-            //Problem 1
             //Aircraft crashes when the fuel time is less than 0. 
             //Starvation
-            //PS: Incorrect solution for problem 2.
             if (arriveTime + fuelTime - System.currentTimeMillis() < 0 && status.get().getPhase() <= 2) {
                 airport.getNormalQueue().remove(this);
                 airport.getUrgentQueue().remove(this);
@@ -179,10 +176,10 @@ class Aircraft implements Runnable {
             airport.getNormalQueue().remove(this);
 
             while (!airport.getUrgentQueue().add(this)) {
-                System.err.println(this.getAircraftCodeName() + " is being added to urgent queue");
+                System.err.println(this.getAircraftCodeName() + " is being added to urgent queue with "+(arriveTime + fuelTime - System.currentTimeMillis())+" milliseconds of fuel time left.");
             };
             System.out.println(this.getAircraftCodeName() + " is added to urgent queue");
-            if (!(status.compareAndSet(Status.QUEUE, Status.URGENT) || status.get() == Status.LANDING)) { //The gate thread might have already obtain this aircraft before changing status
+            if (!(status.compareAndSet(Status.QUEUE, Status.URGENT) || status.get() == Status.LANDING)) {
                 System.out.println(this.getAircraftCodeName() + "'s status is illegal!");
                 rescue();
             }
@@ -231,7 +228,6 @@ class Aircraft implements Runnable {
                 } else {
                     if (assignedGate.get() != null) {
                         assignedGate.get().notifyAll();
-//                assignedGate.set(null);
                     }
                     airport.getTraffic().getRoadToIntersectionFromRunway().release();
                     return;
@@ -361,15 +357,19 @@ class Aircraft implements Runnable {
                 System.out.println(this.getAircraftCodeName() + " has all the passengers disembarked.");
             }
             //Sequential, starts right after all the passengers disembarked.
-            Thread cabinActivity = new Thread(new Activity(this.getAircraftCodeName(), "Refill supplies and clean cabin", 21, 10));
-            cabinActivity.start();
+            Thread cleanCabin = new Thread(new Activity(this.getAircraftCodeName(), "Clean cabin", 21, 10));
+            Thread refillSupplies = new Thread(new Activity(this.getAircraftCodeName(), "Refill supplies", 21, 10));
+            cleanCabin.start();
+            refillSupplies.start();
 
             //Sequential, starts right after all the passengers disembarked.
-            cabinActivity.join();
+            cleanCabin.join();
+            refillSupplies.join();
 
             //Sequential
             //Allow passenger to embark
-            System.out.println(this.getAircraftCodeName() + " allows passenger to embark. There are a total of " + airport.getLounge().countOfPassengers(id) + " passengers waiting.");
+            int counter = airport.getLounge().countOfPassengers(id);
+            System.out.println(this.getAircraftCodeName() + " allows passenger to embark. There are a total of " + counter + " passengers waiting.");
             if (allowEmbark.compareAndSet(false, true)) {
                 for (Passenger p : airport.getLounge().getWaitingPassengers(id)) {
                     synchronized (p) {
@@ -379,11 +379,12 @@ class Aircraft implements Runnable {
             }
 
             //Wait until passengers are all embarked
-            while (!airport.getLounge().getWaitingPassengers(id).isEmpty()) {
+            while (counter != passengersOnBoard.size() && passengersOnBoard.size() < 50) {
+
             }
             System.out.println(this.getAircraftCodeName() + " has a total of " + passengersOnBoard.size() + " passengers embarked.");
 
-            //Wait for fuel to complete refuel
+            //Wait for fuel to compl·ete refuel
             refillFuel.join();
 
             System.out.println(this.getAircraftCodeName() + " is ready to go! Undocking...");
@@ -556,7 +557,6 @@ class Aircraft implements Runnable {
             status.set(Status.ISSUE);
             if (assignedGate.get() != null) {
                 assignedGate.get().notifyAll();
-//                assignedGate.set(null);
             }
 
         } catch (Exception e) {
